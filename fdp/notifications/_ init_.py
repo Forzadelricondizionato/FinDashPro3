@@ -1,1 +1,1 @@
-
+# Notifications package initialization
