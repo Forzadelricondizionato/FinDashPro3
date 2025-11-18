@@ -248,4 +248,51 @@ class FundamentalsManager:
             return self._get_default_fundamentals()
         
         await self.rate_limiter.acquire("fmp", config.fmp_api_key, config.rl_fmp)
-        url = f"https://financialmodelingprep.com/api/v3/ratios/{
+                        url = f"https://financialmodelingprep.com/api/v3/ratios/{ticker}"
+                params = {"apikey": config.fmp_api_key}
+                
+                async with self.session.get(url, params=params, timeout=15) as resp:
+                    if resp.status != 200:
+                        return self._get_default_fundamentals()
+                    
+                    data = await resp.json()
+                    if not data or not isinstance(data, list):
+                        return self._get_default_fundamentals()
+                    
+                    ratios = data[0]
+                    return {
+                        "pe_ratio": ratios.get("priceEarningsRatio", 15.0),
+                        "roe": ratios.get("returnOnEquity", 0.10),
+                        "roa": ratios.get("returnOnAssets", 0.05),
+                        "debt_to_equity": ratios.get("debtEquityRatio", 0.5),
+                        "current_ratio": ratios.get("currentRatio", 2.0),
+                        "net_margin": ratios.get("netProfitMargin", 0.15),
+                        "gross_margin": ratios.get("grossProfitMargin", 0.30),
+                        "operating_margin": ratios.get("operatingProfitMargin", 0.10),
+                        "interest_coverage": ratios.get("interestCoverage", 5.0),
+                        "market_cap": ratios.get("marketCap", 1e9),
+                        "source": "fmp_premium"
+                    }
+        except Exception as e:
+            logger.error("fmp_fundamentals_failed", ticker=ticker, error=str(e))
+            return self._get_default_fundamentals()
+    
+    def _get_default_fundamentals(self) -> Dict[str, float]:
+        """Default fundamentals for failed lookups."""
+        logger.warning("using_default_fundamentals")
+        return {
+            "revenue": 1e9,
+            "net_income": 100e6,
+            "roe": 0.10,
+            "roa": 0.05,
+            "debt_to_equity": 0.5,
+            "current_ratio": 2.0,
+            "net_margin": 0.15,
+            "gross_margin": 0.30,
+            "operating_margin": 0.10,
+            "interest_coverage": 5.0,
+            "pe_ratio": 15.0,
+            "market_cap": 1e9,
+            "source": "fallback"
+        }
+
