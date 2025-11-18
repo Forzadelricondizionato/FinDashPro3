@@ -1,1 +1,12 @@
-
+{
+  "dashboard": {
+    "title": "FinDashPro ML-Max Dashboard",
+    "panels": [
+      {
+        "title": "API Budget Usage",
+        "type": "graph",
+        "targets": [{"expr": "api_costs_total"}]
+      }
+    ]
+  }
+}
