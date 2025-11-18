@@ -1,1 +1,96 @@
+name: FinDashPro CI/CD
 
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+      
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: findashpro_test
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+    
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio pytest-cov pytest-mock pytest-timeout
+    
+    - name: Lint with flake8
+      run: |
+        pip install flake8
+        flake8 fdp tests --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 fdp tests --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Type check with mypy
+      run: |
+        pip install mypy
+        mypy --ignore-missing-imports fdp/
+    
+    - name: Run tests
+      env:
+        FDP_REDIS_URL: redis://localhost:6379/1
+        FDP_DATABASE_URL: postgresql://test:test@localhost:5432/findashpro_test
+        FDP_EXECUTION_MODE: alert_only
+        FDP_KILL_SWITCH_ENABLED: "0"
+        ALPHA_VANTAGE_API_KEY: demo
+        TIINGO_API_KEY: demo
+      run: |
+        pytest -v --cov=fdp --cov-report=xml --cov-report=term-missing --cov-fail-under=85
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: true
+    
+    - name: Build Docker image
+      run: |
+        docker build -t findashpro:${{ github.sha }} .
+        docker tag findashpro:${{ github.sha }} findashpro:latest
+    
+    - name: Security scan
+      uses: anchore/scan-action@v3
+      with:
+        image: "findashpro:latest"
+        fail-build: false
+    
+    - name: Run mutation tests
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      run: |
+        pip install mutmut
+        mutmut run --paths-to-mutate=fdp/ --CI
+        mutmut html
