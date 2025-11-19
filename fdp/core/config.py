@@ -1,143 +1,93 @@
 import os
-import sys
-from dataclasses import dataclass
+import hvac
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List
+from pathlib import Path
 import structlog
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-import threading
-import time
 
 logger = structlog.get_logger()
 
-@dataclass
-class Config:
-    ibkr_host: str = os.getenv("IBKR_HOST", "ibkr_gateway")
-    ibkr_port: int = int(os.getenv("IBKR_PORT", "4002"))
-    ibkr_client_id: int = int(os.getenv("IBKR_CLIENT_ID", "123"))
-    ibkr_readonly: bool = os.getenv("IBKR_READONLY", "true").lower() == "true"
-    ibkr_trading_mode: str = os.getenv("IBKR_TRADING_MODE", "paper")
-    darwin_account_id: Optional[str] = os.getenv("DARWIN_ACCOUNT_ID")
-    alpaca_key: str = os.getenv("ALPACA_API_KEY_ID", "")
-    alpaca_secret: str = os.getenv("ALPACA_API_SECRET_KEY", "")
-    alpaca_paper: bool = os.getenv("ALPACA_PAPER", "true").lower() == "true"
-    paper_trading_capital: float = float(os.getenv("PAPER_TRADING_CAPITAL", "100000"))
-    fmp_api_key: Optional[str] = os.getenv("FMP_API_KEY")
-    finnhub_api_key: Optional[str] = os.getenv("FINNHUB_API_KEY")
-    polygon_key: Optional[str] = os.getenv("POLYGON_API_KEY")
-    alpha_key: Optional[str] = os.getenv("ALPHA_VANTAGE_API_KEY")
-    tiingo_key: Optional[str] = os.getenv("TIINGO_API_KEY")
-    telegram_token: Optional[str] = os.getenv("TELEGRAM_TOKEN")
-    telegram_chat_id: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
-    discord_webhook: Optional[str] = os.getenv("DISCORD_WEBHOOK_URL")
-    execution_mode: str = os.getenv("FDP_EXECUTION_MODE", "paper")
-    max_tickers: int = int(os.getenv("FDP_MAX_TICKERS", "500"))
-    min_confidence: float = float(os.getenv("FDP_MIN_CONFIDENCE", "0.75"))
-    min_sharpe: float = float(os.getenv("FDP_MIN_SHARPE", "0.5"))
-    min_winrate: float = float(os.getenv("FDP_MIN_WINRATE", "0.40"))
-    min_trades: int = int(os.getenv("FDP_MIN_TRADES", "20"))
-    redis_url: str = os.getenv("FDP_REDIS_URL", "redis://localhost:6379")
-    database_url: str = os.getenv("FDP_DATABASE_URL", "")
-    daily_api_budget: float = float(os.getenv("FDP_DAILY_API_BUDGET", "5.0"))
-    rl_yahoo: int = int(os.getenv("FDP_RL_YAHOO", "2000"))
-    rl_alpha: int = int(os.getenv("FDP_RL_ALPHA", "500"))
-    rl_tiingo: int = int(os.getenv("FDP_RL_TIINGO", "500"))
-    rl_polygon: int = int(os.getenv("FDP_RL_POLYGON", "5"))
-    rl_fmp: int = int(os.getenv("FDP_RL_FMP", "300"))
-    rl_finnhub: int = int(os.getenv("FDP_RL_FINNHUB", "60"))
-    ml_test_size: float = float(os.getenv("FDP_ML_TEST_SIZE", "0.20"))
-    ml_optuna_trials: int = int(os.getenv("FDP_ML_OPTUNA_TRIALS", "50"))
-    model_retrain_days: int = int(os.getenv("MODEL_RETRAIN_DAYS", "7"))
-    ml_drift_threshold: float = float(os.getenv("FDP_ML_DRIFT_THRESHOLD", "0.05"))
-    max_position_percent: float = float(os.getenv("FDP_MAX_POSITION_SIZE_PERCENT", "2.0"))
-    max_daily_loss_percent: float = float(os.getenv("FDP_MAX_DAILY_LOSS_PERCENT", "2.0"))
-    kelly_fraction: float = float(os.getenv("FDP_KELLY_FRACTION", "0.25"))
-    kill_switch_enabled: bool = os.getenv("FDP_KILL_SWITCH_ENABLED", "1") == "1"
-    kill_switch_file: str = os.getenv("FDP_KILL_SWITCH_FILE", "./data/STOP.txt")
-    min_current_ratio: float = float(os.getenv("FDP_MIN_CURRENT_RATIO", "1.0"))
-    max_debt_to_equity: float = float(os.getenv("FDP_MAX_DEBT_TO_EQUITY", "2.0"))
-    min_gross_margin: float = float(os.getenv("FDP_MIN_GROSS_MARGIN", "0.10"))
-    min_operating_margin: float = float(os.getenv("FDP_MIN_OPERATING_MARGIN", "0.05"))
-    min_net_margin: float = float(os.getenv("FDP_MIN_NET_MARGIN", "0.05"))
-    min_roe: float = float(os.getenv("FDP_MIN_ROE", "0.08"))
-    min_roa: float = float(os.getenv("FDP_MIN_ROA", "0.04"))
-    min_interest_coverage: float = float(os.getenv("FDP_MIN_INTEREST_COVERAGE", "3.0"))
-    prometheus_port: int = int(os.getenv("FDP_PROMETHEUS_PORT", "9090"))
-    grafana_port: int = int(os.getenv("FDP_GRAFANA_PORT", "3000"))
-    max_concurrent_workers: int = int(os.getenv("FDP_MAX_CONCURRENT_WORKERS", "20"))
-    tier_yahoo: str = os.getenv("FDP_TIER_YAHOO", "free")
-    tier_alpha: str = os.getenv("FDP_TIER_ALPHA", "free")
-    tier_tiingo: str = os.getenv("FDP_TIER_TIINGO", "free")
-    tier_finnhub: str = os.getenv("FDP_TIER_FINNHUB", "free")
-    tier_polygon: str = os.getenv("FDP_TIER_POLYGON", "premium")
-    tier_fmp: str = os.getenv("FDP_TIER_FMP", "free")
-    free_limit_yahoo: Optional[int] = int(os.getenv("FDP_FREE_LIMIT_YAHOO", "2000"))
-    free_limit_alpha: Optional[int] = int(os.getenv("FDP_FREE_LIMIT_ALPHA", "500"))
-    free_limit_tiingo: Optional[int] = int(os.getenv("FDP_FREE_LIMIT_TIINGO", "500"))
-    free_limit_polygon: Optional[int] = int(os.getenv("FDP_FREE_LIMIT_POLYGON", "5"))
-    free_limit_fmp: Optional[int] = int(os.getenv("FDP_FREE_LIMIT_FMP", "300"))
-    free_limit_finnhub: Optional[int] = int(os.getenv("FDP_FREE_LIMIT_FINNHUB", "60"))
-    premium_endpoint_polygon: Optional[str] = os.getenv("FDP_PREMIUM_POLYGON_URL")
-    premium_endpoint_fmp: Optional[str] = os.getenv("FDP_PREMIUM_FMP_URL")
-
-    def validate(self):
-        errors = []
-        if self.execution_mode not in ["alert_only", "paper", "ibkr", "alpaca"]:
-            errors.append(f"INVALID_EXECUTION_MODE: {self.execution_mode}")
-        if not self.database_url:
-            errors.append("MISSING_DATABASE_URL")
-        if self.execution_mode == "alpaca" and (not self.alpaca_key or not self.alpaca_secret):
-            errors.append("MISSING_ALPACA_CREDENTIALS")
-        if self.execution_mode == "ibkr" and not self.ibkr_host:
-            errors.append("MISSING_IBKR_HOST")
-        providers = [self.fmp_api_key, self.finnhub_api_key, self.alpha_key, self.tiingo_key]
-        if not any(providers):
-            errors.append("NO_DATA_PROVIDER_KEYS")
-        if errors:
-            raise ConfigValidationError(errors)
-        logger.info("config_validated", execution_mode=self.execution_mode, max_tickers=self.max_tickers)
-        return True
-
 class ConfigValidationError(Exception):
-    def __init__(self, errors: list):
-        self.errors = errors
-        super().__init__(f"Validation failed: {', '.join(errors)}")
+    pass
 
-class ConfigHotReloadHandler(FileSystemEventHandler):
-    def __init__(self, config_instance: Config):
-        self.config = config_instance
-        self.last_reload = time.time()
-        self.debounce_sec = 2
-
-    def on_modified(self, event):
-        if event.src_path.endswith('.env'):
-            current_time = time.time()
-            if current_time - self.last_reload > self.debounce_sec:
-                self.last_reload = current_time
-                logger.info("config_hot_reload_detected", file=event.src_path)
-                self._reload_config()
-
-    def _reload_config(self):
+class Config(BaseModel):
+    execution_mode: str = Field(..., regex="^(paper|alert_only|ibkr|alpaca)$")
+    max_tickers: int = Field(default=50, ge=1, le=1000)
+    min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    redis_url: str
+    database_url: str
+    daily_api_budget: float = Field(default=5.0, ge=0.0)
+    vault_addr: str = "http://localhost:8200"
+    vault_token: Optional[str] = None
+    kill_switch_enabled: bool = False
+    kill_switch_file: Optional[str] = None
+    kill_switch_token: Optional[str] = None
+    ibkr_host: str = "127.0.0.1"
+    ibkr_port: int = 4001
+    ibkr_client_id: int = 1
+    telegram_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    discord_webhook: Optional[str] = None
+    newsapi_key: Optional[str] = None
+    min_current_ratio: float = 1.0
+    max_debt_to_equity: float = 2.0
+    min_roe: float = 0.08
+    
+    @validator("execution_mode")
+    def validate_execution_mode(cls, v):
+        if v not in ["paper", "alert_only", "ibkr", "alpaca"]:
+            raise ConfigValidationError("INVALID_EXECUTION_MODE")
+        return v
+    
+    @validator("database_url")
+    def validate_database_url(cls, v):
+        if not v or v == "":
+            raise ConfigValidationError("MISSING_DATABASE_URL")
+        return v
+    
+    def load_secrets_from_vault(self):
+        if not self.vault_token:
+            return
+        client = hvac.Client(url=self.vault_addr, token=self.vault_token)
+        if not client.is_authenticated():
+            logger.error("Vault authentication failed")
+            return
+        secret_path = "fdp/secrets"
         try:
-            new_config = Config()
-            new_config.validate()
-            self.config.__dict__.update(new_config.__dict__)
-            logger.critical("config_hot_reload_success")
+            secret = client.secrets.kv.v2.read_secret_version(path=secret_path)
+            data = secret["data"]["data"]
+            for key, value in data.items():
+                if hasattr(self, key) and value:
+                    setattr(self, key, value)
         except Exception as e:
-            logger.error("config_hot_reload_failed", error=str(e))
+            logger.error("Vault read failed", error=str(e))
+    
+    @classmethod
+    def from_env(cls):
+        config = cls(
+            execution_mode=os.getenv("FDP_EXECUTION_MODE", "paper"),
+            max_tickers=int(os.getenv("FDP_MAX_TICKERS", "50")),
+            min_confidence=float(os.getenv("FDP_MIN_CONFIDENCE", "0.75")),
+            redis_url=os.getenv("FDP_REDIS_URL", "redis://localhost:6379/0"),
+            database_url=os.getenv("FDP_DATABASE_URL", ""),
+            daily_api_budget=float(os.getenv("FDP_DAILY_API_BUDGET", "5.0")),
+            vault_addr=os.getenv("VAULT_ADDR", "http://localhost:8200"),
+            vault_token=os.getenv("VAULT_TOKEN"),
+            kill_switch_enabled=os.getenv("FDP_KILL_SWITCH_ENABLED", "0") == "1",
+            kill_switch_file=os.getenv("FDP_KILL_SWITCH_FILE"),
+            kill_switch_token=os.getenv("FDP_KILL_SWITCH_TOKEN"),
+            ibkr_host=os.getenv("IBKR_HOST", "127.0.0.1"),
+            ibkr_port=int(os.getenv("IBKR_PORT", "4001")),
+            ibkr_client_id=int(os.getenv("IBKR_CLIENT_ID", "1")),
+            telegram_token=os.getenv("TELEGRAM_TOKEN"),
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+            discord_webhook=os.getenv("DISCORD_WEBHOOK"),
+            newsapi_key=os.getenv("NEWSAPI_KEY"),
+            min_current_ratio=float(os.getenv("FDP_MIN_CURRENT_RATIO", "1.0")),
+            max_debt_to_equity=float(os.getenv("FDP_MAX_DEBT_TO_EQUITY", "2.0")),
+            min_roe=float(os.getenv("FDP_MIN_ROE", "0.08"))
+        )
+        config.load_secrets_from_vault()
+        return config
 
-def setup_hot_reload(config_instance: Config):
-    handler = ConfigHotReloadHandler(config_instance)
-    observer = Observer()
-    observer.schedule(handler, path='.', recursive=False)
-    observer.start()
-    logger.info("config_hot_reload_watcher_started")
-    return observer
-
-try:
-    config = Config()
-    config.validate()
-    config_observer = setup_hot_reload(config)
-except ConfigValidationError as e:
-    logger.critical("invalid_configuration", errors=e.errors)
-    sys.exit(1)
+config = Config.from_env()
