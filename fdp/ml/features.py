@@ -1,65 +1,76 @@
 import pandas as pd
 import numpy as np
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any
+import structlog
+
+logger = structlog.get_logger()
 
 class FeatureEngineering:
-    """Feature engineering with temporal data splitting."""
-    
-    def engineer_features(self, ohlcv: pd.DataFrame, fundamentals: Dict, sentiment: float) -> Tuple[pd.DataFrame, pd.Series]:
-        """Create features with no lookahead bias."""
-        df = ohlcv.copy().reset_index(drop=True)
-        
-        # Technical indicators
-        df['returns'] = df['close'].pct_change()
-        df['volatility'] = df['returns'].rolling(20).std()
-        df['rsi'] = self._calculate_rsi(df['close'])
-        df['sma_20'] = df['close'].rolling(20).mean()
-        df['sma_50'] = df['close'].rolling(50).mean()
-        df['sma_200'] = df['close'].rolling(200).mean()
-        df['bb_upper'], df['bb_lower'] = self._calculate_bollinger_bands(df['close'])
-        
-        # Volume indicators
-        df['volume_sma'] = df['volume'].rolling(20).mean()
-        df['volume_ratio'] = df['volume'] / df['volume_sma'].replace(0, np.nan)
-        
-        # Sentiment (static for the day)
-        df['sentiment'] = sentiment
-        
-        # Fundamentals (static, limited to 5 features)
-        fundamental_keys = list(fundamentals.keys())[:5]
-        for i, key in enumerate(fundamental_keys):
-            df[f'fund_{i}'] = fundamentals.get(key, 0)
-        
-        # Remove rows with NaN
-        df.dropna(inplace=True)
-        
-        if df.empty or len(df) < 100:
+    def __init__(self):
+        self.lookback_periods = [5, 10, 20, 50, 200]
+
+    def engineer_features(self, ohlcv: pd.DataFrame, fundamentals: Dict[str, Any], sentiment: float) -> Tuple[pd.DataFrame, pd.Series]:
+        if ohlcv.empty:
             return pd.DataFrame(), pd.Series()
-        
-        # Target variable: 5-day forward return (no leakage)
-        df['future_return'] = df['close'].pct_change(5).shift(-5)
-        df = df.dropna()
-        
-        # Features (exclude target and original prices)
-        feature_cols = [col for col in df.columns if col not in ['close', 'future_return', 'date']]
-        X = df[feature_cols]
-        y = (df['future_return'] > 0).astype(int)
-        
-        return X, y
-    
-    def _calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate RSI indicator."""
+        df = ohlcv.copy()
+        df = self._add_technical_indicators(df)
+        df = self._add_fundamental_features(df, fundamentals)
+        df['sentiment'] = sentiment
+        df = self._add_lag_features(df)
+        df = self._add_volatility_features(df)
+        target = self._create_target(df)
+        feature_cols = [col for col in df.columns if col not in ['target', 'date', 'symbol']]
+        return df[feature_cols], target
+
+    def _add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        for period in self.lookback_periods:
+            df[f'sma_{period}'] = df['close'].rolling(window=period).mean()
+            df[f'ema_{period}'] = df['close'].ewm(span=period).mean()
+            df[f'rsi_{period}'] = self._calculate_rsi(df['close'], period)
+            df[f'momentum_{period}'] = df['close'].pct_change(period)
+        df['macd'], df['macd_signal'] = self._calculate_macd(df['close'])
+        df['bollinger_upper'], df['bollinger_lower'] = self._calculate_bollinger(df['close'])
+        return df
+
+    def _calculate_rsi(self, prices: pd.Series, period: int) -> pd.Series:
         delta = prices.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
         rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi.replace(np.inf, 100).replace(-np.inf, 0).fillna(50)
-    
-    def _calculate_bollinger_bands(self, prices: pd.Series, period: int = 20, std_dev: int = 2) -> tuple:
-        """Calculate Bollinger Bands."""
-        sma = prices.rolling(period).mean()
-        rolling_std = prices.rolling(period).std()
-        upper_band = sma + (rolling_std * std_dev)
-        lower_band = sma - (rolling_std * std_dev)
-        return upper_band, lower_band
+        return 100 - (100 / (1 + rs))
+
+    def _calculate_macd(self, prices: pd.Series) -> Tuple[pd.Series, pd.Series]:
+        ema12 = prices.ewm(span=12).mean()
+        ema26 = prices.ewm(span=26).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9).mean()
+        return macd, signal
+
+    def _calculate_bollinger(self, prices: pd.Series, period: int = 20) -> Tuple[pd.Series, pd.Series]:
+        sma = prices.rolling(window=period).mean()
+        std = prices.rolling(window=period).std()
+        return sma + (std * 2), sma - (std * 2)
+
+    def _add_fundamental_features(self, df: pd.DataFrame, fundamentals: Dict[str, Any]) -> pd.DataFrame:
+        df['pe_ratio'] = fundamentals.get('priceEarningsRatio', np.nan)
+        df['pb_ratio'] = fundamentals.get('priceToBookRatio', np.nan)
+        df['debt_equity'] = fundamentals.get('debtEquityRatio', np.nan)
+        df['roe'] = fundamentals.get('returnOnEquity', np.nan)
+        df['current_ratio'] = fundamentals.get('currentRatio', np.nan)
+        return df.ffill().bfill()
+
+    def _add_lag_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        for lag in [1, 2, 5, 10]:
+            df[f'close_lag_{lag}'] = df['close'].shift(lag)
+            df[f'volume_lag_{lag}'] = df['volume'].shift(lag)
+        return df
+
+    def _add_volatility_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        df['volatility_5d'] = df['close'].pct_change().rolling(5).std()
+        df['volatility_30d'] = df['close'].pct_change().rolling(30).std()
+        df['volatility_200d'] = df['close'].pct_change().rolling(200).std()
+        return df
+
+    def _create_target(self, df: pd.DataFrame) -> pd.Series:
+        df['target'] = (df['close'].shift(-5) > df['close']).astype(int)
+        return df['target']
