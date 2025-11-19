@@ -1,131 +1,90 @@
+# docker-compose.yml
 version: '3.8'
 
 services:
-  vault:
-    image: hashicorp/vault:1.15
-    container_name: fdp-vault
-    environment:
-      VAULT_DEV_ROOT_TOKEN_ID: fdp-root-token
-    ports:
-      - "8200:8200"
-    cap_add:
-      - IPC_LOCK
-    volumes:
-      - vault-data:/vault/file
-    command: server -dev
-
   redis:
     image: redis:7-alpine
-    container_name: fdp-redis
+    command: redis-server --appendonly yes --save 60 1
     ports:
       - "6379:6379"
     volumes:
-      - redis-data:/data
-    command: redis-server --save 60 1 --loglevel warning
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   postgres:
     image: postgres:15-alpine
-    container_name: fdp-postgres
     environment:
       POSTGRES_DB: findashpro
-      POSTGRES_USER: fdp_user
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-defaultpassword123}
+      POSTGRES_USER: fdp
+      POSTGRES_PASSWORD: fdp_pass
     ports:
       - "5432:5432"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fdp"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
-  app:
-    build: .
-    container_name: fdp-app
-    environment:
-      VAULT_ADDR: http://vault:8200
-      VAULT_TOKEN: ${VAULT_TOKEN:-fdp-root-token}
-      REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://fdp_user:${DB_PASSWORD:-defaultpassword123}@postgres:5432/findashpro
-      EXECUTION_MODE: ${EXECUTION_MODE:-paper}
-      JAEGER_ENABLED: ${JAEGER_ENABLED:-true}
-      JAEGER_HOST: jaeger
-      MTLS_ENABLED: ${MTLS_ENABLED:-false}
-    volumes:
-      - ./fdp:/app/fdp
-      - ./dashboard.py:/app/dashboard.py
-      - ./main.py:/app/main.py
-      - ./data:/app/data
+  grafana:
+    image: grafana/grafana:latest
     ports:
-      - "8000:8000"
-      - "8501:8501"
-    depends_on:
-      - vault
-      - redis
-      - postgres
-    restart: unless-stopped
-
-  ibkr-gateway:
-    image: ghcr.io/unusualalpha/ib-gateway-docker:stable
-    container_name: fdp-ibkr-gateway
+      - "3000:3000"
     environment:
-      TWS_USERID: ${IBKR_USER}
-      TWS_PASSWORD: ${IBKR_PASSWORD}
-      TRADING_MODE: ${EXECUTION_MODE:-paper}
-      TWS_SETTINGS_PATH: /root/Jts
-    ports:
-      - "4001:4001"
-      - "4002:4002"
+      GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
-      - ibkr-data:/root/Jts
-    profiles:
-      - ibkr
+      - grafana_data:/var/lib/grafana
+      - ./grafana:/etc/grafana/provisioning
 
   prometheus:
-    image: prom/prometheus:v2.47
-    container_name: fdp-prometheus
+    image: prom/prometheus:latest
     ports:
       - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus-data:/prometheus
 
-  grafana:
-    image: grafana/grafana:10.1
-    container_name: fdp-grafana
+  orchestrator:
+    build: .
+    command: python main.py
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
-    ports:
-      - "3000:3000"
+      - FDP_REDIS_URL=redis://redis:6379
+      - FDP_DATABASE_URL=postgresql://fdp:fdp_pass@postgres:5432/findashpro
     volumes:
-      - grafana-data:/var/lib/grafana
-      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
-      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=5).raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
-  jaeger:
-    image: jaegertracing/all-in-one:1.50
-    container_name: fdp-jaeger
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
     ports:
-      - "16686:16686"
-      - "14268:14268"
+      - "8501:8501"
+    depends_on:
+      - redis
     environment:
-      - COLLECTOR_OTLP_ENABLED=true
-    profiles:
-      - monitoring
-
-  mlflow:
-    image: python:3.11-slim
-    container_name: fdp-mlflow
-    command: bash -c "pip install mlflow && mlflow server --host 0.0.0.0 --port 5000"
-    ports:
-      - "5000:5000"
+      - FDP_REDIS_URL=redis://redis:6379
     volumes:
-      - mlflow-data:/mlflow
-    profiles:
-      - mlops
+      - ./dashboard.py:/app/dashboard.py
+      - ./static:/app/static
 
 volumes:
-  vault-data:
-  redis-data:
-  postgres-data:
-  ibkr-data:
-  prometheus-data:
-  grafana-data:
-  mlflow-data:
+  redis_data:
+  postgres_data:
+  grafana_data:
