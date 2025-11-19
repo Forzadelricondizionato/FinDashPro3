@@ -1,12 +1,75 @@
 {
   "dashboard": {
-    "title": "FinDashPro ML-Max Dashboard",
+    "id": null,
+    "title": "FinDashPro ML-Max v3.2.0",
+    "tags": ["fdp", "trading", "ml"],
+    "timezone": "browser",
     "panels": [
       {
-        "title": "API Budget Usage",
+        "id": 1,
+        "title": "Portfolio Value",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "fdp_portfolio_value",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "API Budget Spent",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "fdp_api_costs_daily",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Signals per Hour",
         "type": "graph",
-        "targets": [{"expr": "api_costs_total"}]
+        "targets": [
+          {
+            "expr": "rate(fdp_signals_total[1h])",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 4,
+        "title": "Circuit Breaker State",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "fdp_circuit_breaker_state",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 4}
+      },
+      {
+        "id": 5,
+        "title": "Drift Detection Alerts",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "fdp_drift_detected",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
       }
-    ]
+    ],
+    "time": {
+      "from": "now-24h",
+      "to": "now"
+    },
+    "refresh": "10s"
   }
 }
