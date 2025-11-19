@@ -1,0 +1,38 @@
+# grafana/alerting.yml
+apiVersion: 1
+
+groups:
+  - name: fdp-alerts
+    interval: 30s
+    rules:
+      - alert: CircuitBreakerOpen
+        expr: fdp_circuit_breaker_state == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker {{ $labels.provider }} is open"
+      
+      - alert: DriftDetected
+        expr: fdp_drift_detected == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Data drift detected for {{ $labels.ticker }}"
+      
+      - alert: VaRBreach
+        expr: fdp_var_1d > 0.05
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "1-day VaR exceeds 5% threshold"
+      
+      - alert: APIBudgetExceeded
+        expr: fdp_api_budget_spent > 4.5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API budget 90% exhausted"
