@@ -1,82 +1,49 @@
 import pandas as pd
+import numpy as np
+from typing import Dict, Any
 from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
-from typing import Dict, Any
+import structlog
+
+logger = structlog.get_logger()
 
 class AdvancedFeatureSelector:
-    """Advanced feature selection with multiple methods."""
-    
-    def select_features(self, X: pd.DataFrame, y: pd.Series, method: str = "ensemble") -> Dict[str, Any]:
-        """Select features using specified method."""
+    def __init__(self):
+        self.max_features = 50
+
+    def select_features(self, X: pd.DataFrame, y: pd.Series, method: str = "ensemble") -> Any:
         if X.empty or y.empty:
-            return {"features": X, "selected_count": X.shape[1], "method": "none"}
-        
+            return type('', (), {'features': X})()
         if method == "ensemble":
-            return self._ensemble_selection(X, y)
-        elif method == "kbest":
-            return self._kbest_selection(X, y)
-        elif method == "forest":
-            return self._forest_selection(X, y)
+            selected = self._ensemble_selection(X, y)
+        elif method == "statistical":
+            selected = self._statistical_selection(X, y)
+        elif method == "random_forest":
+            selected = self._random_forest_selection(X, y)
         else:
-            return {"features": X, "selected_count": X.shape[1], "method": "none"}
-    
-    def _ensemble_selection(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
-        """Ensemble feature selection."""
-        # Method 1: KBest ANOVA
-        k = min(20, X.shape[1])
-        selector_kbest = SelectKBest(score_func=f_classif, k=k)
-        X_kbest = selector_kbest.fit_transform(X, y)
-        kbest_features = X.columns[selector_kbest.get_support()].tolist()
-        
-        # Method 2: Mutual Information
-        selector_mi = SelectKBest(score_func=mutual_info_classif, k=k)
-        X_mi = selector_mi.fit_transform(X, y)
-        mi_features = X.columns[selector_mi.get_support()].tolist()
-        
-        # Intersection of selections
-        selected_features = list(set(kbest_features) & set(mi_features))
-        
-        if not selected_features:
-            selected_features = kbest_features
-        
-        return {
-            "features": X[selected_features],
-            "selected_count": len(selected_features),
-            "method": "ensemble",
-            "kbest_scores": dict(zip(X.columns, selector_kbest.scores_)),
-            "mi_scores": dict(zip(X.columns, selector_mi.scores_))
-        }
-    
-    def _kbest_selection(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
-        """KBest selection only."""
-        k = min(20, X.shape[1])
-        selector = SelectKBest(score_func=f_classif, k=k)
-        X_selected = selector.fit_transform(X, y)
-        selected_features = X.columns[selector.get_support()].tolist()
-        
-        return {
-            "features": X[selected_features],
-            "selected_count": len(selected_features),
-            "method": "kbest",
-            "scores": dict(zip(X.columns, selector.scores_))
-        }
-    
-    def _forest_selection(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
-        """Random Forest feature importance."""
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        
-        forest = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
-        forest.fit(X_scaled, y)
-        
-        importances = forest.feature_importances_
-        indices = np.argsort(importances)[::-1]
-        selected_features = X.columns[indices[:20]].tolist()
-        
-        return {
-            "features": X[selected_features],
-            "selected_count": len(selected_features),
-            "method": "forest",
-            "importances": dict(zip(X.columns, importances))
-        }
+            selected = X.columns.tolist()
+        return type('', (), {'features': X[selected]})()
+
+    def _ensemble_selection(self, X: pd.DataFrame, y: pd.Series) -> list:
+        rf_selected = self._random_forest_selection(X, y)
+        mi_selected = self._mutual_info_selection(X, y)
+        f_selected = self._statistical_selection(X, y)
+        combined = set(rf_selected) | set(mi_selected) | set(f_selected)
+        return list(combined)[:self.max_features]
+
+    def _statistical_selection(self, X: pd.DataFrame, y: pd.Series) -> list:
+        selector = SelectKBest(f_classif, k=min(self.max_features, X.shape[1]))
+        selector.fit(X, y)
+        return X.columns[selector.get_support()].tolist()
+
+    def _mutual_info_selection(self, X: pd.DataFrame, y: pd.Series) -> list:
+        mi = mutual_info_classif(X, y)
+        indices = np.argsort(mi)[-self.max_features:]
+        return X.columns[indices].tolist()
+
+    def _random_forest_selection(self, X: pd.DataFrame, y: pd.Series) -> list:
+        rf = RandomForestClassifier(n_estimators=100, random_state=42)
+        rf.fit(X, y)
+        importances = rf.feature_importances_
+        indices = np.argsort(importances)[-self.max_features:]
+        return X.columns[indices].tolist()
