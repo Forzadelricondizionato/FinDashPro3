@@ -1,11 +1,11 @@
-import aiohttp
 import asyncio
-import numpy as np
-import pandas as pd
-from typing import Dict
+import aiohttp
+import re
+from typing import Dict, Any, List
 import structlog
+from urllib.parse import quote
 from fdp.core.rate_limiter import TokenBucketRateLimiter
-from fdp.core.config import config
+import feedparser
 
 logger = structlog.get_logger()
 
@@ -14,103 +14,70 @@ class AdvancedSentimentAnalyzer:
         self.rate_limiter = rate_limiter
         self.finnhub_key = finnhub_key
         self.session: Optional[aiohttp.ClientSession] = None
-    
+
     async def __aenter__(self):
-        timeout = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
-        self.session = aiohttp.ClientSession(timeout=timeout)
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.session:
             await self.session.close()
-    
-    async def analyze_comprehensive(self, ticker: str) -> Dict[str, any]:
-        """Analyze news sentiment from multiple sources."""
-        news = await self._fetch_news(ticker)
-        social = await self._analyze_social_sentiment(ticker)
-        
-        composite = (news.get("sentiment", 0) * 0.4 + social.get("sentiment", 0) * 0.6)
-        
+
+    async def analyze_comprehensive(self, ticker: str) -> Dict[str, Any]:
+        news = await self._fetch_finnhub_news(ticker)
+        social = await self._fetch_social_sentiment(ticker)
+        composite_score = self._calculate_composite(news, social)
         return {
-            "news_sentiment": float(news.get("sentiment", 0)),
-            "social_sentiment": float(social.get("sentiment", 0)),
-            "composite_score": float(composite),
-            "volume": int(news.get("volume", 0) + social.get("volume", 0))
+            "composite_score": composite_score,
+            "news_sentiment": news.get("sentiment", 0),
+            "social_sentiment": social.get("sentiment", 0),
+            "news_count": news.get("count", 0)
         }
-    
-    async def _fetch_news(self, ticker: str) -> Dict:
-        """Fetch news from Finnhub (free tier: 60 req/min)."""
+
+    async def _fetch_finnhub_news(self, ticker: str) -> Dict[str, Any]:
         if not self.finnhub_key:
-            return {"sentiment": 0, "volume": 0}
-        
-        await self.rate_limiter.acquire("finnhub", self.finnhub_key, config.rl_finnhub)
-        
-        today = pd.Timestamp.now().date()
-        week_ago = today - pd.Timedelta(days=7)
-        
-        url = (f"https://finnhub.io/api/v1/company-news?"
-               f"symbol={ticker}&from={week_ago}&to={today}&token={self.finnhub_key}")
-        
-        try:
-            async with self.session.get(url, timeout=10) as resp:
-                if resp.status != 200:
-                    return {"sentiment": 0, "volume": 0}
-                
-                data = await resp.json()
-                if not data:
-                    return {"sentiment": 0, "volume": 0}
-                
-                sentiments = []
-                for article in data[:20]:  # Limit to recent 20 articles
-                    sentiment = article.get("sentiment", 0)
-                    if sentiment == "positive":
-                        sentiments.append(1)
-                    elif sentiment == "negative":
-                        sentiments.append(-1)
-                    else:
-                        sentiments.append(0)
-                
-                return {
-                    "sentiment": float(np.mean(sentiments)) if sentiments else 0,
-                    "volume": len(data)
-                }
-        except Exception as e:
-            logger.error("news_fetch_failed", ticker=ticker, error=str(e))
-            return {"sentiment": 0, "volume": 0}
-    
-    async def _analyze_social_sentiment(self, ticker: str) -> Dict:
-        """Analyze social sentiment from Twitter/Reddit (GDELT fallback)."""
-        gdelt_sentiment = await self._fetch_gdelt(ticker)
-        return {
-            "sentiment": gdelt_sentiment,
-            "volume": 100  # Placeholder
+            return {}
+        await self.rate_limiter.acquire("finnhub", f"{ticker}_news", config.rl_finnhub)
+        url = "https://finnhub.io/api/v1/company-news"
+        params = {
+            "symbol": ticker,
+            "from": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d"),
+            "to": datetime.now().strftime("%Y-%m-%d"),
+            "token": self.finnhub_key
         }
-    
-    async def _fetch_gdelt(self, ticker: str) -> float:
-        """Fetch from GDELT 2.0 API (free, no key required)."""
-        try:
-            # GDELT Timeline API
-            url = "https://api.gdeltproject.org/api/v2/tv/tv"
-            params = {
-                "query": f"{ticker} AND (stock OR market)",
-                "mode": "TimelineVolRaw",
-                "format": "json"
-            }
-            
-            async with self.session.get(url, params=params, timeout=15) as resp:
-                if resp.status != 200:
-                    return 0.0
-                
-                data = await resp.json()
-                if "timeline" not in data:
-                    return 0.0
-                
-                # Simple sentiment proxy: high volume = high interest
-                volumes = [item["value"] for item in data["timeline"][:10]]
-                avg_volume = np.mean(volumes) if volumes else 0
-                
-                return min(1.0, avg_volume / 1000)  # Normalize
-                
-        except Exception as e:
-            logger.error("gdelt_fetch_failed", ticker=ticker, error=str(e))
-            return 0.0
+        async with self.session.get(url, params=params, timeout=15) as resp:
+            if resp.status != 200:
+                return {}
+            data = await resp.json()
+            if not data:
+                return {}
+            sentiments = [self._analyze_text_sentiment(article.get("headline", "")) for article in data[:10]]
+            avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0
+            return {"sentiment": avg_sentiment, "count": len(data)}
+
+    async def _fetch_social_sentiment(self, ticker: str) -> Dict[str, Any]:
+        if not self.finnhub_key:
+            return {}
+        await self.rate_limiter.acquire("finnhub", f"{ticker}_social", config.rl_finnhub)
+        url = f"https://finnhub.io/api/v1/stock/social-sentiment"
+        params = {"symbol": ticker, "token": self.finnhub_key}
+        async with self.session.get(url, params=params, timeout=15) as resp:
+            if resp.status != 200:
+                return {}
+            data = await resp.json()
+            reddit_sentiment = sum([item.get("sentiment", 0) for item in data.get("reddit", [])[:10]]) / 10 if data.get("reddit") else 0
+            twitter_sentiment = sum([item.get("sentiment", 0) for item in data.get("twitter", [])[:10]]) / 10 if data.get("twitter") else 0
+            return {"sentiment": (reddit_sentiment + twitter_sentiment) / 2}
+
+    def _analyze_text_sentiment(self, text: str) -> float:
+        positive_words = ["growth", "profit", "rise", "gain", "bullish", "strong", "buy", "up"]
+        negative_words = ["loss", "fall", "drop", "bearish", "weak", "sell", "down", "crisis"]
+        words = re.findall(r'\w+', text.lower())
+        pos_count = sum(1 for word in words if word in positive_words)
+        neg_count = sum(1 for word in words if word in negative_words)
+        total = pos_count + neg_count
+        return (pos_count - neg_count) / total if total > 0 else 0
+
+    def _calculate_composite(self, news: Dict, social: Dict) -> float:
+        weights = {"news": 0.6, "social": 0.4}
+        return (news.get("sentiment", 0) * weights["news"] + social.get("sentiment", 0) * weights["social"]) / sum(weights.values())
