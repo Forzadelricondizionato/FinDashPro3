@@ -1,1 +1,27 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: redis-failure
+spec:
+  action: pod-failure
+  mode: one
+  selector:
+    labelSelectors:
+      app: fdp-redis
+  duration: "30s"
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: api-latency
+spec:
+  action: delay
+  mode: all
+  selector:
+    labelSelectors:
+      app: fdp-app
+  delay:
+    latency: "500ms"
+    correlation: "50"
+  duration: "1m"
 
