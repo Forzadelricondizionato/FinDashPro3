@@ -1,7 +1,12 @@
 import os
+import sys
 from dataclasses import dataclass
 from typing import Optional, List
 import structlog
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+import threading
+import time
 
 logger = structlog.get_logger()
 
@@ -98,9 +103,41 @@ class ConfigValidationError(Exception):
         self.errors = errors
         super().__init__(f"Validation failed: {', '.join(errors)}")
 
+class ConfigHotReloadHandler(FileSystemEventHandler):
+    def __init__(self, config_instance: Config):
+        self.config = config_instance
+        self.last_reload = time.time()
+        self.debounce_sec = 2
+
+    def on_modified(self, event):
+        if event.src_path.endswith('.env'):
+            current_time = time.time()
+            if current_time - self.last_reload > self.debounce_sec:
+                self.last_reload = current_time
+                logger.info("config_hot_reload_detected", file=event.src_path)
+                self._reload_config()
+
+    def _reload_config(self):
+        try:
+            new_config = Config()
+            new_config.validate()
+            self.config.__dict__.update(new_config.__dict__)
+            logger.critical("config_hot_reload_success")
+        except Exception as e:
+            logger.error("config_hot_reload_failed", error=str(e))
+
+def setup_hot_reload(config_instance: Config):
+    handler = ConfigHotReloadHandler(config_instance)
+    observer = Observer()
+    observer.schedule(handler, path='.', recursive=False)
+    observer.start()
+    logger.info("config_hot_reload_watcher_started")
+    return observer
+
 try:
     config = Config()
     config.validate()
+    config_observer = setup_hot_reload(config)
 except ConfigValidationError as e:
     logger.critical("invalid_configuration", errors=e.errors)
     sys.exit(1)
