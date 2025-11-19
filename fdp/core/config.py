@@ -32,6 +32,10 @@ class Config(BaseModel):
     min_current_ratio: float = 1.0
     max_debt_to_equity: float = 2.0
     min_roe: float = 0.08
+    jaeger_enabled: bool = Field(default=False)
+    jaeger_host: str = Field(default="jaeger")
+    jaeger_port: int = Field(default=6831)
+    mtls_enabled: bool = Field(default=False)
     
     @validator("execution_mode")
     def validate_execution_mode(cls, v):
@@ -85,7 +89,11 @@ class Config(BaseModel):
             newsapi_key=os.getenv("NEWSAPI_KEY"),
             min_current_ratio=float(os.getenv("FDP_MIN_CURRENT_RATIO", "1.0")),
             max_debt_to_equity=float(os.getenv("FDP_MAX_DEBT_TO_EQUITY", "2.0")),
-            min_roe=float(os.getenv("FDP_MIN_ROE", "0.08"))
+            min_roe=float(os.getenv("FDP_MIN_ROE", "0.08")),
+            jaeger_enabled=os.getenv("JAEGER_ENABLED", "false") == "true",
+            jaeger_host=os.getenv("JAEGER_HOST", "jaeger"),
+            jaeger_port=int(os.getenv("JAEGER_PORT", "6831")),
+            mtls_enabled=os.getenv("MTLS_ENABLED", "false") == "true"
         )
         config.load_secrets_from_vault()
         return config
