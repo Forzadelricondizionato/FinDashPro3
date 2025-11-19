@@ -1,0 +1,11 @@
+{
+  "buy": "Compra",
+  "sell": "Vendi",
+  "buy_signal": "🚀 Segnale di acquisto: {{ticker}} @ {{price}}",
+  "sell_signal": "📉 Segnale di vendita: {{ticker}} @ {{price}}",
+  "stop_loss": "Stop-vendita",
+  "take_profit": "Take-profit",
+  "low_confidence": "Confidenza bassa",
+  "risk_blocked": "Ordine bloccato da risk manager",
+  "api_limit_exceeded": "Limite API giornaliero superato"
+}
