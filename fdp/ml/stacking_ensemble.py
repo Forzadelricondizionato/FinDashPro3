@@ -1,121 +1,60 @@
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from typing import Dict, Any
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import cross_val_score, TimeSeriesSplit
+from sklearn.svm import SVC
+from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import f1_score
-import joblib
-from pathlib import Path
+import structlog
+
+logger = structlog.get_logger()
 
 class StackingEnsemble:
-    """Stacking ensemble with temporal validation."""
-    
-    def __init__(self, ticker: str, model_dir: Path = Path("./data/models")):
+    def __init__(self, ticker: str):
         self.ticker = ticker
-        self.model_dir = model_dir / ticker
-        self.model_dir.mkdir(parents=True, exist_ok=True)
-        
         self.models = {
-            "rf": RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1),
-            "gb": GradientBoostingClassifier(n_estimators=100, random_state=42),
-            "meta": LogisticRegression(random_state=42, max_iter=500)
+            "rf": RandomForestClassifier(n_estimators=200, max_depth=10, random_state=42),
+            "gb": GradientBoostingClassifier(n_estimators=150, learning_rate=0.05, random_state=42),
+            "ada": AdaBoostClassifier(n_estimators=100, random_state=42),
+            "svc": SVC(probability=True, kernel='rbf', gamma='scale')
         }
+        self.meta_model = LogisticRegression(random_state=42)
         self.scaler = StandardScaler()
-        self.is_trained = False
-    
-    def train(self, X: pd.DataFrame, y: pd.Series) -> dict:
-        """Train ensemble with time series cross-validation."""
-        if X.empty or y.empty:
-            return {"status": "failed", "reason": "empty_data"}
-        
-        # Scale features
-        X_scaled = self.scaler.fit_transform(X)
-        
-        # Time series split for cross-validation
-        tscv = TimeSeriesSplit(n_splits=5)
-        
-        # Train base learners
-        meta_features = np.zeros((X_scaled.shape[0], len(self.models) - 1))
-        
-        for idx, (name, model) in enumerate([(k, v) for k, v in self.models.items() if k != "meta"]):
-            model.fit(X_scaled, y)
-            
-            # Generate meta-features (out-of-fold predictions)
-            oof_predictions = np.zeros(X_scaled.shape[0])
-            for train_idx, val_idx in tscv.split(X_scaled):
-                X_train_fold, X_val_fold = X_scaled[train_idx], X_scaled[val_idx]
-                y_train_fold = y.iloc[train_idx]
-                
-                fold_model = model.__class__(**model.get_params())
-                fold_model.fit(X_train_fold, y_train_fold)
-                oof_predictions[val_idx] = fold_model.predict_proba(X_val_fold)[:, 1]
-            
-            meta_features[:, idx] = oof_predictions
-            
-            # Save base model
-            joblib.dump(model, self.model_dir / f"{name}_model.pkl")
-        
-        # Train meta-learner
-        self.models["meta"].fit(meta_features, y)
-        joblib.dump(self.models["meta"], self.model_dir / "meta_model.pkl")
-        joblib.dump(self.scaler, self.model_dir / "scaler.pkl")
-        
-        # Cross-validation scores
-        scores = {}
-        for name, model in self.models.items():
-            if name != "meta":
-                cv_scores = cross_val_score(model, X_scaled, y, cv=tscv, scoring='f1')
-                scores[name] = cv_scores.mean()
-        
-        # Meta-learner score
-        meta_pred = self.models["meta"].predict(meta_features)
-        scores["meta"] = f1_score(y, meta_pred)
-        scores["ensemble"] = np.mean(list(scores.values()))
-        
-        self.is_trained = True
-        
-        return {
-            "status": "success",
-            "scores": scores,
-            "model_path": str(self.model_dir)
-        }
-    
-    def predict(self, X: pd.DataFrame) -> dict:
-        """Make predictions with trained ensemble."""
-        if not self.is_trained:
-            # Try loading from disk
-            try:
-                self._load_models()
-            except:
-                return {"status": "failed", "reason": "model_not_trained"}
-        
-        X_scaled = self.scaler.transform(X)
-        
-        # Generate meta-features
-        meta_features = np.zeros((X_scaled.shape[0], len(self.models) - 1))
-        
-        for idx, (name, model) in enumerate([(k, v) for k, v in self.models.items() if k != "meta"]):
-            meta_features[:, idx] = model.predict_proba(X_scaled)[:, 1]
-        
-        # Meta-learner prediction
-        meta_proba = self.models["meta"].predict_proba(meta_features)
-        meta_pred = self.models["meta"].predict(meta_features)
-        
-        direction = 1 if meta_pred.mean() == 1 else 0
-        
-        return {
-            "status": "success",
-            "direction": direction,
-            "probabilities": meta_proba[:, 1],
-            "expected_return": meta_proba[:, 1].mean() * 0.05,
-            "confidence": meta_proba[:, 1].max()
-        }
-    
-    def _load_models(self):
-        """Load models from disk."""
-        self.scaler = joblib.load(self.model_dir / "scaler.pkl")
-        for name in self.models:
-            self.models[name] = joblib.load(self.model_dir / f"{name}_model.pkl")
-        self.is_trained = True
 
+    def train(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
+        if X.empty or y.empty:
+            return {"ensemble": {"accuracy": 0.0, "f1": 0.0}}
+        X_scaled = self.scaler.fit_transform(X)
+        meta_features = np.zeros((X.shape[0], len(self.models)))
+        for idx, (name, model) in enumerate(self.models.items()):
+            model.fit(X_scaled, y)
+            scores = cross_val_score(model, X_scaled, y, cv=5, scoring='f1')
+            logger.info("model_trained", model=name, f1=scores.mean())
+            if hasattr(model, "predict_proba"):
+                meta_features[:, idx] = model.predict_proba(X_scaled)[:, 1]
+            else:
+                meta_features[:, idx] = model.predict(X_scaled)
+        self.meta_model.fit(meta_features, y)
+        meta_scores = cross_val_score(self.meta_model, meta_features, y, cv=5, scoring='f1')
+        logger.info("meta_model_trained", f1=meta_scores.mean())
+        return {"ensemble": {"accuracy": meta_scores.mean(), "f1": meta_scores.mean()}}
+
+    def predict(self, X: pd.DataFrame) -> Dict[str, Any]:
+        if X.empty:
+            return {"direction": 0, "probabilities": [], "expected_return": 0.0}
+        X_scaled = self.scaler.transform(X)
+        meta_features = np.zeros((X.shape[0], len(self.models)))
+        for idx, (name, model) in enumerate(self.models.items()):
+            if hasattr(model, "predict_proba"):
+                meta_features[:, idx] = model.predict_proba(X_scaled)[:, 1]
+            else:
+                meta_features[:, idx] = model.predict(X_scaled)
+        final_pred = self.meta_model.predict(meta_features)
+        final_prob = self.meta_model.predict_proba(meta_features)[:, 1] if hasattr(self.meta_model, "predict_proba") else final_pred
+        expected_return = np.mean(final_prob) * 0.02
+        return {
+            "direction": 1 if np.mean(final_pred) > 0.5 else 0,
+            "probabilities": final_prob.tolist(),
+            "expected_return": expected_return
+        }
