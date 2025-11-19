@@ -18,6 +18,9 @@ from fdp.core.circuit_breaker import CircuitBreaker
 from fdp.core.vault_client import VaultClient
 from fdp.core.audit_logger import AuditLogger
 from fdp.core.prometheus_metrics import METRICS
+from fdp.security.mtls_config import get_ssl_context
+from fdp.tracing.jaeger_tracer import trace_function, tracer
+from fdp.api.health import router as health_router
 from fdp.data.providers.market_data import MultiSourceMarketDataManager
 from fdp.data.providers.fundamentals import FundamentalsManager
 from fdp.data.providers.sentiment import AdvancedSentimentAnalyzer
@@ -84,13 +87,15 @@ class FinDashProOrchestrator:
             task.cancel()
     
     async def init_db_pool(self):
+        ssl_ctx = get_ssl_context(server=False, for_client="postgres") if config.mtls_enabled else None
         for attempt in range(3):
             try:
                 self.db_pool = await asyncpg.create_pool(
                     config.database_url,
                     min_size=2,
                     max_size=20,
-                    command_timeout=60
+                    command_timeout=60,
+                    ssl=ssl_ctx
                 )
                 self.audit_logger.pool = self.db_pool
                 logger.info("db_pool_connected", size=20)
@@ -271,70 +276,75 @@ class FinDashProOrchestrator:
                 logger.error("worker_exception", worker_id=worker_id, error=str(e))
                 await asyncio.sleep(5)
     
+    @trace_function("process_ticker_safe")
     async def process_ticker_safe(self, ticker: str, region: str, asset_type: str) -> Dict[str, Any]:
-        try:
-            if not await self.check_kill_switch():
-                return {"status": "killed"}
-            
-            await self.rate_limiter.acquire("processing", f"ticker:{ticker}", 0)
-            
-            ohlcv = await self.market_data.fetch_ohlcv(ticker, datetime.now() - timedelta(days=365), datetime.now())
-            if ohlcv.empty:
-                return {"status": "failed", "reason": "No OHLCV data"}
-            
-            if not self.quality.validate_ohlcv(ohlcv):
-                return {"status": "failed", "reason": "Data quality failed"}
-            
-            fundamentals = await self.fundamentals.get_latest(ticker)
-            sentiment = await self.sentiment.analyze_comprehensive(ticker)
-            
-            X, y = self.feature_engineer.engineer_features(ohlcv, fundamentals, sentiment)
-            if X.empty:
-                return {"status": "failed", "reason": "Feature engineering failed"}
-            
-            selected_features = self.feature_selector.select_features(X, y)
-            model = self.model_registry.get_model(ticker)
-            prediction = model.predict(selected_features)
-            
-            if prediction["confidence"] < config.min_confidence:
-                return {"status": "skipped", "reason": "Confidence below threshold"}
-            
-            drift_result = await self.drift_monitor.check(ticker, X)
-            if drift_result["drift_detected"]:
-                await self.notifier.send_alert(f"Drift detected on {ticker}: {drift_result['warnings']}")
-            
-            account = await self.broker.get_account_summary()
-            position_size = self.position_sizer.calculate_position_size(
-                win_probability=prediction["probability"],
-                win_loss_ratio=2.0,
-                account_summary=account,
-                edge=prediction["expected_return"]
-            )
-            
-            signal = {
-                "ticker": ticker,
-                "action": prediction["direction"],
-                "price": prediction.get("target_price", 0),
-                "confidence": prediction["confidence"],
-                "position_size": position_size,
-                "timestamp": datetime.now().isoformat(),
-                "drift_detected": drift_result["drift_detected"]
-            }
-            
-            await self.redis.lpush("signals:queue", signal)
-            await self.audit_logger.log("signal_generated", "system", ticker, prediction["direction"], signal)
-            
-            METRICS["signals_total"].inc()
-            self.metrics["total_signals"] += 1
-            
-            return {"status": "success", "signal": signal}
-        except Exception as e:
-            logger.error("process_ticker_error", ticker=ticker, error=str(e))
-            return {"status": "failed", "reason": str(e)}
+        with tracer.start_active_span("process_ticker") as scope:
+            scope.span.set_tag("ticker", ticker)
+            try:
+                if not await self.check_kill_switch():
+                    return {"status": "killed"}
+                
+                await self.rate_limiter.acquire("processing", f"ticker:{ticker}", 0)
+                
+                ohlcv = await self.market_data.fetch_ohlcv(ticker, datetime.now() - timedelta(days=365), datetime.now())
+                if ohlcv.empty:
+                    return {"status": "failed", "reason": "No OHLCV data"}
+                
+                if not self.quality.validate_ohlcv(ohlcv):
+                    return {"status": "failed", "reason": "Data quality failed"}
+                
+                fundamentals = await self.fundamentals.get_latest(ticker)
+                sentiment = await self.sentiment.analyze_comprehensive(ticker)
+                
+                X, y = self.feature_engineer.engineer_features(ohlcv, fundamentals, sentiment)
+                if X.empty:
+                    return {"status": "failed", "reason": "Feature engineering failed"}
+                
+                selected_features = self.feature_selector.select_features(X, y)
+                model = self.model_registry.get_model(ticker)
+                prediction = model.predict(selected_features)
+                
+                if prediction["confidence"] < config.min_confidence:
+                    return {"status": "skipped", "reason": "Confidence below threshold"}
+                
+                drift_result = await self.drift_monitor.check(ticker, X)
+                if drift_result["drift_detected"]:
+                    await self.notifier.send_alert(f"Drift detected on {ticker}: {drift_result['warnings']}")
+                
+                account = await self.broker.get_account_summary()
+                position_size = self.position_sizer.calculate_position_size(
+                    win_probability=prediction["probability"],
+                    win_loss_ratio=2.0,
+                    account_summary=account,
+                    edge=prediction["expected_return"]
+                )
+                
+                signal = {
+                    "ticker": ticker,
+                    "action": prediction["direction"],
+                    "price": prediction.get("target_price", 0),
+                    "confidence": prediction["confidence"],
+                    "position_size": position_size,
+                    "timestamp": datetime.now().isoformat(),
+                    "drift_detected": drift_result["drift_detected"]
+                }
+                
+                await self.redis.lpush("signals:queue", signal)
+                await self.audit_logger.log("signal_generated", "system", ticker, prediction["direction"], signal)
+                
+                METRICS["signals_total"].inc()
+                self.metrics["total_signals"] += 1
+                
+                scope.span.set_tag("error", False)
+                return {"status": "success", "signal": signal}
+            except Exception as e:
+                logger.error("process_ticker_error", ticker=ticker, error=str(e))
+                scope.span.set_tag("error", True)
+                scope.span.log_kv({'error': str(e)})
+                return {"status": "failed", "reason": str(e)}
     
     async def shutdown(self):
         self.running = False
         await self.close_db_pool()
         await self.broker.disconnect()
         await self.redis.close()
-
