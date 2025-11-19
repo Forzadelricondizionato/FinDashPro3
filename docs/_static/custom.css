@@ -1,1 +1,31 @@
+/* FinDashPro custom styles */
+.wy-nav-content {
+    max-width: 1200px !important;
+}
 
+.highlight {
+    background-color: #f8f9fa;
+    border-radius: 4px;
+}
+
+.sphinx-tabs-panel {
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 1rem;
+}
+
+.sd-btn-primary {
+    background-color: #007bff !important;
+    border-color: #007bff !important;
+}
+
+div.mermaid {
+    text-align: center;
+    margin: 2rem 0;
+}
+
+.toctree-wrapper .caption {
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: #007bff;
+}
