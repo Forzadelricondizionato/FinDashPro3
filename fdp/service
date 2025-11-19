@@ -1,0 +1,26 @@
+# systemd/fdp.service
+[Unit]
+Description=FinDashPro ML-Max Orchestrator
+After=network.target redis.service postgresql.service
+Wants=redis.service postgresql.service
+
+[Service]
+Type=simple
+User=fdp
+Group=fdp
+WorkingDirectory=/opt/findashpro
+Environment="PATH=/opt/findashpro/venv/bin"
+EnvironmentFile=/opt/findashpro/.env
+ExecStart=/opt/findashpro/venv/bin/python main.py
+ExecReload=/bin/kill -s HUP $MAINPID
+ExecStop=/bin/kill -s TERM $MAINPID
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fdp
+WatchdogSec=60
+NotifyAccess=main
+
+[Install]
+WantedBy=multi-user.target
