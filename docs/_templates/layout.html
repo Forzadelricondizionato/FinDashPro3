@@ -1,1 +1,21 @@
+{% extends "!layout.html" %}
+
+{% block extrahead %}
+    <link rel="icon" type="image/x-icon" href="{{ pathto('_static/favicon.ico', 1) }}">
+    <meta name="description" content="FinDashPro ML-Max 3.1.4 - Enterprise AI Trading System">
+    <meta property="og:title" content="FinDashPro ML-Max Documentation">
+    <meta property="og:description" content="Complete API reference and setup guide">
+{% endblock %}
+
+{% block footer %}
+    {{ super() }}
+    <div class="footer-extra">
+        <p>
+            <strong>FinDashPro ML-Max 3.1.4</strong> - 
+            <a href="https://github.com/findashpro/findashpro">GitHub</a> | 
+            <a href="https://hub.docker.com/r/findashpro/findashpro">Docker Hub</a> | 
+            <a href="https://t.me/findashpro">Telegram</a>
+        </p>
+    </div>
+{% endblock %}
 
