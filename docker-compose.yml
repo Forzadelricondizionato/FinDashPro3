@@ -1,101 +1,105 @@
 version: '3.8'
 
 services:
+  vault:
+    image: hashicorp/vault:1.15
+    container_name: fdp-vault
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: fdp-root-token
+    ports:
+      - "8200:8200"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - vault-data:/vault/file
+    command: server -dev
+
   redis:
     image: redis:7-alpine
+    container_name: fdp-redis
     ports:
       - "6379:6379"
-    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
     volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+      - redis-data:/data
+    command: redis-server --save 60 1 --loglevel warning
 
   postgres:
     image: postgres:15-alpine
+    container_name: fdp-postgres
     environment:
-      POSTGRES_USER: findashpro
-      POSTGRES_PASSWORD: findashpro
       POSTGRES_DB: findashpro
+      POSTGRES_USER: fdp_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-defaultpassword123}
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U findashpro"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
 
-  orchestrator:
+  app:
     build: .
-    command: python main.py
-    env_file: .env
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
+    container_name: fdp-app
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: ${VAULT_TOKEN:-fdp-root-token}
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://fdp_user:${DB_PASSWORD:-defaultpassword123}@postgres:5432/findashpro
+      EXECUTION_MODE: ${EXECUTION_MODE:-paper}
     volumes:
+      - ./fdp:/app/fdp
+      - ./dashboard.py:/app/dashboard.py
+      - ./main.py:/app/main.py
       - ./data:/app/data
-      - ./logs:/app/logs
-      - /etc/timezone:/etc/timezone:ro
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 4g
-          cpus: '2'
-
-  dashboard:
-    build: .
-    command: streamlit run dashboard.py --server.port=8501 --server.address=0.0.0.0
     ports:
+      - "8000:8000"
       - "8501:8501"
-    env_file: .env
     depends_on:
+      - vault
       - redis
       - postgres
-    volumes:
-      - ./data:/app/data
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+
+  ibkr-gateway:
+    image: ghcr.io/unusualalpha/ib-gateway-docker:stable
+    container_name: fdp-ibkr-gateway
+    environment:
+      TWS_USERID: ${IBKR_USER}
+      TWS_PASSWORD: ${IBKR_PASSWORD}
+      TRADING_MODE: ${EXECUTION_MODE:-paper}
+      TWS_SETTINGS_PATH: /root/Jts
+    ports:
+      - "4001:4001"
+      - "4002:4002"
+    volumes:
+      - ibkr-data:/root/Jts
+    profiles:
+      - ibkr
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.47
+    container_name: fdp-prometheus
     ports:
       - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command: --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus
-    restart: unless-stopped
+      - prometheus-data:/prometheus
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:10.1
+    container_name: fdp-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
     ports:
       - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
-      - grafana_data:/var/lib/grafana
+      - grafana-data:/var/lib/grafana
       - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
       - ./grafana/datasources:/etc/grafana/provisioning/datasources
-    restart: unless-stopped
-    depends_on:
-      - prometheus
 
 volumes:
-  redis_data:
-  postgres_data:
-  prometheus_data:
-  grafana_data:
-
+  vault-data:
+  redis-data:
+  postgres-data:
+  ibkr-data:
+  prometheus-data:
+  grafana-data:
