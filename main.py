@@ -1,70 +1,46 @@
+# main.py
 import asyncio
-import signal
 import sys
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
-import uvicorn
-import structlog
+import redis.asyncio as redis
 from fdp.core.orchestrator import FinDashProOrchestrator
-from fdp.core.config import Config
-from fdp.core.vault_client import VaultClient
-from fdp.api.routes import router
+from fdp.core.config import config
+from fdp.core.rate_limiter import TokenBucketRateLimiter
+from fdp.core.circuit_breaker import CircuitBreaker
+from fdp.ml.stacking_ensemble import StackingEnsemble
+from fdp.ml.features import FeatureEngineering
+from fdp.trading.position_sizer import KellyPositionSizer
+from fdp.trading.risk_manager import RiskManager
+from fdp.trading.broker_adapter_enhanced import get_broker_adapter
+from fdp.notifications.manager import MultiChannelNotifier
+import structlog
 
 logger = structlog.get_logger()
-app = FastAPI(title="FinDashPro API", version="3.2.0")
-security = HTTPBearer()
 
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    services: dict
-
-@app.on_event("startup")
-async def startup_event():
-    global orchestrator
+async def main():
     orchestrator = FinDashProOrchestrator()
-    await orchestrator.init()
-    logger.info("API started")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await orchestrator.shutdown()
-    logger.info("API shutdown")
-
-@app.get("/health", response_model=HealthResponse)
-async def health_check():
-    redis_status = await orchestrator.redis.ping()
-    db_status = orchestrator.db_pool is not None
-    vault_status = VaultClient().is_initialized()
-    return HealthResponse(
-        status="healthy" if all([redis_status, db_status, vault_status]) else "degraded",
-        version="3.2.0",
-        services={
-            "redis": redis_status,
-            "postgres": db_status,
-            "vault": vault_status
-        }
+    orchestrator.config = config
+    orchestrator.redis = redis.from_url(config.redis_url, decode_responses=True)
+    orchestrator.rate_limiter = TokenBucketRateLimiter(orchestrator.redis, config.daily_api_budget)
+    orchestrator.circuit_breaker = CircuitBreaker()
+    orchestrator.feature_engineer = FeatureEngineering()
+    orchestrator.model = StackingEnsemble(Path("data/models"))
+    orchestrator.position_sizer = KellyPositionSizer()
+    orchestrator.risk_manager = RiskManager()
+    orchestrator.notifier = MultiChannelNotifier(config, orchestrator.rate_limiter, Path("notifications/templates"))
+    orchestrator.broker = get_broker_adapter(config, orchestrator.notifier, orchestrator.redis)
+    
+    await orchestrator.init_db_pool()
+    await orchestrator.init_redis_streams()
+    await orchestrator.broker.connect()
+    
+    universe = await orchestrator.load_ticker_universe()
+    
+    await asyncio.gather(
+        orchestrator.producer(universe),
+        orchestrator.consumer(),
+        orchestrator.start_api_server()
     )
 
-@app.post("/kill-switch")
-async def kill_switch(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if credentials.credentials != orchestrator.config.kill_switch_token:
-        raise HTTPException(status_code=403, detail="Invalid token")
-    orchestrator.running = False
-    logger.critical("Kill switch activated")
-    return {"status": "killed"}
-
-@app.get("/metrics/prometheus")
-async def prometheus_metrics():
-    from prometheus_client import generate_latest
-    return generate_latest()
-
-app.include_router(router, prefix="/api/v1")
-
-def main():
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False, workers=1)
-
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
