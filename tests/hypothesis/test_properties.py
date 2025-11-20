@@ -1,3 +1,4 @@
+# tests/hypothesis/test_properties.py
 import pytest
 from hypothesis import given, strategies as st, settings
 from fdp.trading.position_sizer import KellyPositionSizer
@@ -37,4 +38,3 @@ class TestRiskManagerProperties:
             assert result["allowed"] is False
         else:
             assert result["allowed"] is True
-
