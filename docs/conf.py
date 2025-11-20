@@ -1,3 +1,4 @@
+# docs/conf.py
 import os
 import sys
 sys.path.insert(0, os.path.abspath('..'))
@@ -83,6 +84,3 @@ redirects = {
     "installation": "setup.html",
     "quickstart": "tutorial.html"
 }
-
-def setup(app):
-    app.add_css_file('custom.css')
