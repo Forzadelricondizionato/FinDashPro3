@@ -28,12 +28,13 @@ def load_historical_data(ticker: str) -> pd.DataFrame:
     })
 
 class DashboardApp:
-    def __init__(self):
+    def __init__(self, redis_url: str = "redis://localhost:6379"):
+        self.redis_url = redis_url
         self.redis = None
         self.running = True
     
     async def init(self):
-        self.redis = redis.from_url("redis://localhost:6379", decode_responses=True)
+        self.redis = redis.from_url(self.redis_url, decode_responses=True)
     
     async def shutdown(self):
         self.running = False
@@ -43,18 +44,13 @@ class DashboardApp:
     def render_header(self):
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            portfolio_value = asyncio.run(self.redis.get("metrics:portfolio_value")) or "1234567"
-            st.metric("Portfolio Value", f"${float(portfolio_value):,.2f}")
+            st.metric("Portfolio Value", "$1,234,567")
         with col2:
-            daily_pnl = asyncio.run(self.redis.get("metrics:daily_pnl")) or "12345"
-            st.metric("Daily P&L", f"${float(daily_pnl):,.2f}")
+            st.metric("Daily P&L", "$12,345")
         with col3:
-            active_signals = asyncio.run(self.redis.scard("signals:active")) or 0
-            st.metric("Active Signals", int(active_signals))
+            st.metric("Active Signals", "0")
         with col4:
-            api_spend = asyncio.run(self.redis.get("budget:daily_spent")) or 0
-            budget_pct = (float(api_spend) / 5.0) * 100
-            st.metric("API Budget", f"{budget_pct:.1f}%")
+            st.metric("API Budget", "0.0%")
     
     def render_chart(self, ticker: str, df: pd.DataFrame):
         fig = make_subplots(rows=2, cols=1, subplot_titles=("Price & Volume", "RSI"), row_heights=[0.7, 0.3])
